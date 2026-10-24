@@ -1,0 +1,10 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# 本地工具/会话状态
+.mimosa/
+*.log
+
+# 运行时生成的数据
+diaries/

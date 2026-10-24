@@ -1,0 +1,128 @@
+{
+  "schedule": {
+    "type": "object",
+    "description": "⏰ 定时设置",
+    "items": {
+      "enable": {
+        "type": "bool",
+        "default": true,
+        "description": "启用每日定时生成"
+      },
+      "publish_time": {
+        "type": "string",
+        "default": "21:30",
+        "description": "每日生成时间（24 小时制 HH:MM）",
+        "hint": "如 08:00、21:30。修改保存后即生效，无需重启。"
+      }
+    }
+  },
+  "llm": {
+    "type": "object",
+    "description": "🤖 大模型设置",
+    "items": {
+      "provider_id": {
+        "type": "string",
+        "default": "",
+        "_special": "select_provider",
+        "description": "服务提供商",
+        "hint": "留空则使用 AstrBot 全局默认提供商。"
+      },
+      "model": {
+        "type": "string",
+        "default": "",
+        "description": "模型 ID",
+        "hint": "留空则使用该提供商配置中的默认模型。"
+      },
+      "prompt": {
+        "type": "text",
+        "default": "你是一位热爱生活、观察细腻的日记作者。请以第一人称写一篇 {date} 的日记，主题自选，可以记录生活、见闻、思考或心情。要求：\n1. 内容真诚自然，有细节、有画面感，避免空洞套话\n2. 不要出现真实他人的隐私信息\n3. 直接输出日记正文，不要标题、日期行、前言或总结",
+        "description": "日记写作提示词",
+        "hint": "可用占位符：{date} 中文日期、{min_words}/{max_words} 字数范围、{banned_words} 禁止内容。字数与禁止内容的硬性要求会自动附在提示词末尾，无需重复填写。"
+      },
+      "word_count_min": {
+        "type": "int",
+        "default": 200,
+        "description": "字数下限",
+        "slider": { "min": 50, "max": 2000, "step": 50 }
+      },
+      "word_count_max": {
+        "type": "int",
+        "default": 400,
+        "description": "字数上限",
+        "slider": { "min": 100, "max": 3000, "step": 50 }
+      }
+    }
+  },
+  "content_rules": {
+    "type": "object",
+    "description": "🚫 内容审核",
+    "items": {
+      "banned_words": {
+        "type": "text",
+        "default": "",
+        "description": "日记中禁止出现的内容",
+        "hint": "每行一条。能编译为正则表达式的按正则匹配，否则按文本包含匹配。命中后会自动重写一次，仍命中则该篇日记不发布、不入知识库。"
+      }
+    }
+  },
+  "storage": {
+    "type": "object",
+    "description": "💾 存储设置",
+    "items": {
+      "kb_names": {
+        "type": "list",
+        "default": [],
+        "_special": "select_knowledgebase",
+        "description": "存放日记的知识库",
+        "hint": "可多选；需先在 WebUI「知识库」中创建并配置好嵌入模型。"
+      },
+      "save_txt": {
+        "type": "bool",
+        "default": true,
+        "description": "保存 TXT 文件",
+        "hint": "保存路径：data/plugin_data/astrbot_plugin_daily_diary/diaries/"
+      }
+    }
+  },
+  "qzone": {
+    "type": "object",
+    "description": "🌐 QQ 空间发布",
+    "items": {
+      "enable": {
+        "type": "bool",
+        "default": false,
+        "description": "写完后自动发布到 QQ 空间（说说）"
+      },
+      "uin": {
+        "type": "string",
+        "default": "",
+        "description": "Bot 的 QQ 号"
+      },
+      "cookie": {
+        "type": "string",
+        "default": "",
+        "secret": true,
+        "description": "QQ 空间 Cookie",
+        "hint": "浏览器登录 qzone.qq.com 后按 F12 复制完整 Cookie，需包含 p_skey 字段。Cookie 失效后需手动更新（详见 README）。"
+      },
+      "privacy": {
+        "type": "string",
+        "default": "公开",
+        "description": "说说可见范围",
+        "options": ["公开", "仅好友", "仅自己"]
+      }
+    }
+  },
+  "notify": {
+    "type": "object",
+    "description": "📢 结果通知",
+    "items": {
+      "sessions": {
+        "type": "list",
+        "default": [],
+        "description": "定时任务完成后接收结果通知的会话",
+        "hint": "在目标会话中发送「/diary 推送」即可一键加入或移出当前会话。"
+      }
+    }
+  }
+}

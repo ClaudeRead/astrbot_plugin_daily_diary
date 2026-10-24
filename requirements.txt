@@ -1,0 +1,2 @@
+# 无额外第三方依赖：
+# - aiohttp（QQ 空间发布）与 apscheduler（定时任务）均为 AstrBot 内置依赖
