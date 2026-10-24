@@ -36,8 +36,15 @@ def _assert_safe_url(url: str) -> None:
     if parsed.scheme not in ("http", "https"):
         raise ValueError(f"不支持的 URL 协议: {parsed.scheme!r}")
     host = (parsed.hostname or "").lower()
+
+    # ipaddress 对非法字面量抛普通 ValueError（其子类 AddressValueError 同样被覆盖）
     try:
         ip = ipaddress.ip_address(host)
+    except ValueError:
+        ip = None
+
+    if ip is not None:
+        # 是 IP 字面量：拒绝内网/环回/保留/链路本地地址（含云元数据 169.254.169.254）
         if (
             ip.is_private
             or ip.is_loopback
@@ -46,10 +53,8 @@ def _assert_safe_url(url: str) -> None:
             or ip.is_unspecified
         ):
             raise ValueError(f"禁止请求内网/保留地址: {host}")
-    except ipaddress.AddressValueError:
-        # 非 IP 字面量，检查常见本机域名
-        if host in ("localhost",) or host.endswith(".local"):
-            raise ValueError(f"禁止请求本机地址: {host}")
+    elif host == "localhost" or host.endswith(".local"):
+        raise ValueError(f"禁止请求本机地址: {host}")
 
 
 def calc_gtk(skey: str) -> int:
