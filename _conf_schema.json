@@ -13,6 +13,12 @@
         "default": "21:30",
         "description": "每日生成时间（24 小时制 HH:MM）",
         "hint": "如 08:00、21:30。修改保存后即生效，无需重启。"
+      },
+      "timezone": {
+        "type": "string",
+        "default": "Asia/Shanghai",
+        "description": "定时触发所用时区",
+        "hint": "IANA 时区名。Docker 部署的 AstrBot 容器多为 UTC，保持默认 Asia/Shanghai 即按北京时间触发。"
       }
     }
   },

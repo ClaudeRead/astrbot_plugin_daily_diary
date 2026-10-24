@@ -14,6 +14,7 @@
 
 import asyncio
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -28,6 +29,7 @@ from .qzone_publisher import publish_diary
 
 JOB_ID = "daily_diary_publish"  # 定时任务 ID
 DEFAULT_TIME = "21:30"          # publish_time 为空或非法时的回退时间
+DEFAULT_TZ = "Asia/Shanghai"    # 容器常为 UTC，默认按北京时间触发
 PLUGIN_DIR_NAME = "astrbot_plugin_daily_diary"
 
 
@@ -38,14 +40,26 @@ class DailyDiaryPlugin(Star):
         super().__init__(context)
         self.config = config
         self.generator = DiaryGenerator(context, config)
-        self.scheduler = AsyncIOScheduler()
+        # 定时器显式指定时区，避免跟随容器系统时区（多为 UTC）导致触发时间偏移
+        self.scheduler = AsyncIOScheduler(timezone=self._resolve_timezone())
         self._lock = asyncio.Lock()  # 防止定时任务与手动触发同时生成
+
+    def _resolve_timezone(self) -> ZoneInfo:
+        """解析配置的时区；非法时依次回退到 Asia/Shanghai 与系统本地时区。"""
+        schedule_cfg = self.config.get("schedule", {}) or {}
+        tz_name = str(schedule_cfg.get("timezone") or DEFAULT_TZ).strip()
+        for name in (tz_name, DEFAULT_TZ):
+            try:
+                return ZoneInfo(name)
+            except Exception:
+                logger.warning(f"[每日一记] 未知时区 {name!r}，尝试回退")
+        return None  # None = APScheduler 跟随系统本地时区
 
     async def initialize(self) -> None:
         """插件加载/重载时注册定时任务（WebUI 保存配置后会自动重载插件）。"""
-        self._setup_schedule()
         if not self.scheduler.running:
-            self.scheduler.start()
+            self.scheduler.start()   # 先启动调度器，add_job 后才能读到下次运行时间
+        self._setup_schedule()
         logger.info("[每日一记] 插件已加载")
 
     async def terminate(self) -> None:
@@ -78,13 +92,18 @@ class DailyDiaryPlugin(Star):
 
         self.scheduler.add_job(
             self._scheduled_job,
-            CronTrigger(hour=hour, minute=minute),
+            CronTrigger(hour=hour, minute=minute, timezone=self.scheduler.timezone),
             id=JOB_ID,
             replace_existing=True,
             misfire_grace_time=3600,  # 进程重启等错过触发点时，1 小时内补跑
             coalesce=True,            # 多次错过只补跑一次
         )
-        logger.info(f"[每日一记] 定时任务已排程：每日 {hour:02d}:{minute:02d}")
+        job = self.scheduler.get_job(JOB_ID)
+        next_run = str(job.next_run_time) if job and job.next_run_time else "未知"
+        logger.info(
+            f"[每日一记] 定时任务已排程：每日 {hour:02d}:{minute:02d}"
+            f"（{self.scheduler.timezone}），下次运行：{next_run}"
+        )
 
     async def _scheduled_job(self) -> None:
         """定时任务入口：生成日记并把结果推送到通知会话。"""
@@ -265,7 +284,8 @@ class DailyDiaryPlugin(Star):
         lines = [
             "📖 每日一记 · 当前配置",
             f"⏰ 定时：{'启用' if schedule.get('enable', True) else '停用'}，"
-            f"每日 {schedule.get('publish_time') or DEFAULT_TIME}（下次：{next_run}）",
+            f"每日 {schedule.get('publish_time') or DEFAULT_TIME}"
+            f"（{self.scheduler.timezone}，下次：{next_run}）",
             f"🤖 模型：{provider_desc}",
             f"📏 字数：{llm.get('word_count_min', 200)} ~ {llm.get('word_count_max', 400)} 字",
             f"📚 知识库：{kb_names}",
