@@ -160,6 +160,7 @@ class DailyDiaryPlugin(Star):
                 )
                 if file_path:
                     lines.append(f"📄 正文已存档：{file_path.name}")
+                logger.warning("[每日一记] 本次结果：\n" + "\n".join(lines))
                 return "\n".join(lines)
 
             # 4. 写入知识库
@@ -182,6 +183,7 @@ class DailyDiaryPlugin(Star):
             lines.append(f"✅ 完成，字数 {result.word_count}{note}")
             if file_path:
                 lines.append(f"📄 TXT 已保存：{file_path.name}")
+            logger.info("[每日一记] 本次结果：\n" + "\n".join(lines))
             return "\n".join(lines)
 
     def _save_txt(self, date_str: str, pretty_date: str, result: DiaryResult):
