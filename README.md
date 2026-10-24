@@ -11,7 +11,7 @@
 - 🤖 **大模型可指定**：可选服务提供商 + 模型 ID；不指定则使用 AstrBot 全局默认
 - 📚 **知识库自由指定**：支持多个知识库，多选即可；日记自动分块、向量化入库
 - 📄 **TXT 自动存档**：保存至 `data/plugin_data/astrbot_plugin_daily_diary/diaries/`
-- 🌐 **QQ 空间自动发布**：写完由 Bot 自己发说说，可见范围可选公开/仅好友/仅自己
+- 🌐 **QQ 空间自动发布**：写完联动 [astrbot_plugin_qzone](https://github.com/Zhalslar/astrbot_plugin_qzone) 插件自动发说说（Cookie/登录由该插件管理）
 - 📢 **结果通知**：生成结果自动推送到指定会话（在会话里发一条命令即可绑定）
 
 ## 工作流程
@@ -99,10 +99,9 @@
 
 | 配置项 | 默认值 | 说明 |
 |---|---|---|
-| 启用自动发布 | 关 | 开启后每次生成成功即发布 |
-| Bot 的 QQ 号 | 空 | 用于生成 Referer 与令牌 |
-| QQ 空间 Cookie | 空 | 见下方获取方法 |
-| 可见范围 | 公开 | 公开 / 仅好友 / 仅自己 |
+| 联动 astrbot_plugin_qzone 发布 | 关 | 开启后每次生成成功即发布 |
+
+发布能力由 **astrbot_plugin_qzone** 插件提供，见下节。
 
 ### 📢 结果通知
 
@@ -120,22 +119,16 @@
 
 > 前缀 `/` 以你的唤醒前缀设置为准。生成可能需要数十秒，请耐心等待回复。
 
-## QQ 空间 Cookie 获取方法
+## QQ 空间发布：联动 astrbot_plugin_qzone
 
-插件通过 QQ 空间 Web 版接口用 Bot 自己的账号发布说说，需要提供登录 Cookie：
+本插件不直接管理 QQ 空间登录，发布功能通过 [astrbot_plugin_qzone](https://github.com/Zhalslar/astrbot_plugin_qzone) 插件完成：
 
-1. 用浏览器（建议 Chrome）登录 [qzone.qq.com](https://qzone.qq.com)，账号即 Bot 的 QQ 号
-2. 按 `F12` 打开开发者工具 → **网络**（Network）标签
-3. 刷新页面，点击第一个请求（`qzone.qq.com`），在 **请求标头** 中找到 `Cookie:` 一行
-4. 复制完整的 Cookie 值（一整行），粘贴到插件配置的「QQ 空间 Cookie」中
+1. 在 AstrBot 插件市场安装 **astrbot_plugin_qzone**（QQ空间）并启用
+2. 按该插件的说明完成 QQ 空间登录/Cookie 配置（配置都在它那边），并用它的 `/发说说` 命令确认能发
+3. 回到本插件配置，打开「联动 astrbot_plugin_qzone 发布」开关
+4. 发送 `/diary 状态`，QQ 空间一行显示「已联动 astrbot_plugin_qzone」即就绪
 
-也可用 **应用**（Application）→ Cookie 面板逐项复制，但必须包含 **`p_skey`** 字段（令牌由它计算）。
-
-**注意事项：**
-
-- Cookie 有有效期（一般数天到数周），失效后发布会报 `code=-3000` 等错误，按上面步骤重新获取并更新配置即可
-- 修改 QQ 密码、异地登录等操作会使 Cookie 立即失效
-- 频繁自动发说说存在被QQ风控的风险，建议每天一篇的频率保持不变
+发布失败（Cookie 失效等）会在结果通知与日志中说明原因，更新 Cookie 请在 astrbot_plugin_qzone 的配置中操作。
 
 ## 二次开发指南
 
@@ -143,7 +136,7 @@
 astrbot_plugin_daily_diary/
 ├── main.py             # 入口：指令注册、定时调度、流程编排（_run_diary 是主流程）
 ├── diary_generator.py  # 生成：提示词组装、LLM 调用、字数/违禁校验（generate 为主入口）
-├── qzone_publisher.py  # 发布：QQ 空间 Web 接口封装（publish_diary 为主入口）
+├── qzone_link.py       # 联动：调用 astrbot_plugin_qzone 发布（publish_diary 为主入口）
 ├── metadata.yaml       # 插件元数据（名称、版本、兼容版本范围）
 ├── _conf_schema.json   # 配置模式（WebUI 配置面板由此生成）
 ├── requirements.txt    # 第三方依赖（当前为空）
@@ -152,7 +145,7 @@ astrbot_plugin_daily_diary/
 
 常见扩展点：
 
-- **换发布渠道**（如 Telegram 频道）：在 `main.py` 的 `_run_diary` 中把 `publish_diary(...)` 换成对应平台的调用即可
+- **换发布渠道**（如 Telegram 频道）：在 `main.py` 的 `_run_diary` 中把 `publish_diary(...)` 换成对应平台的调用即可；参照 `qzone_link.py` 的写法可对接任意其他插件
 - **调整生成策略**：`diary_generator.py` 顶部的 `WORD_TOLERANCE`（字数容差）与 `MAX_RETRY`（重试次数）
 - **换存档格式**（如 Markdown）：改 `main.py` 的 `_save_txt`
 - **增配置项**：改 `_conf_schema.json` 后在代码中 `self.config.get(...)` 读取；AstrBot 会自动为老配置补默认值
@@ -171,8 +164,11 @@ astrbot_plugin_daily_diary/
 **Q：知识库写入失败？**
 确认知识库已在 WebUI「知识库」中创建，且已选择可用的嵌入模型（Embedding Provider）；用 `/diary 状态` 可查看当前可用的知识库列表。
 
-**Q：QQ 空间发布返回 code=-3000？**
-Cookie 已失效，按上文步骤重新获取并更新。
+**Q：QQ 空间发布失败「未找到已启用的 astrbot_plugin_qzone」？**
+安装并启用 astrbot_plugin_qzone 插件，且完成其登录配置；用 `/diary 状态` 检查联动是否就绪。
+
+**Q：QQ 空间发布失败提示 Cookie 相关？**
+登录态由 astrbot_plugin_qzone 管理，请到该插件的配置中更新 Cookie/重新登录，与本插件无关。
 
 **Q：字数总是不达标？**
 字数统计为去除空白后的字符数；模型对字数控制有限，插件在超出 ±30% 容差时会重写一次，仍偏差则接受并在通知中标注。可适当放大设定范围或更换字数控制更好的模型。

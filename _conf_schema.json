@@ -97,25 +97,8 @@
       "enable": {
         "type": "bool",
         "default": false,
-        "description": "写完后自动发布到 QQ 空间（说说）"
-      },
-      "uin": {
-        "type": "string",
-        "default": "",
-        "description": "Bot 的 QQ 号"
-      },
-      "cookie": {
-        "type": "string",
-        "default": "",
-        "secret": true,
-        "description": "QQ 空间 Cookie",
-        "hint": "浏览器登录 qzone.qq.com 后按 F12 复制完整 Cookie，需包含 p_skey 字段。Cookie 失效后需手动更新（详见 README）。"
-      },
-      "privacy": {
-        "type": "string",
-        "default": "公开",
-        "description": "说说可见范围",
-        "options": ["公开", "仅好友", "仅自己"]
+        "description": "写完后联动 astrbot_plugin_qzone 发布到 QQ 空间",
+        "hint": "需先安装、启用并配置好 astrbot_plugin_qzone 插件（QQ 登录/Cookie 在该插件中配置）。可用 /diary 状态 检查联动是否就绪。"
       }
     }
   },

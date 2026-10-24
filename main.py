@@ -3,13 +3,13 @@
 每日定时由大模型撰写一篇日记，完成后自动：
     1. 保存为 TXT 文件（data/plugin_data/astrbot_plugin_daily_diary/diaries/）
     2. 写入指定的知识库（支持多个）
-    3. 发布到 QQ 空间（可选，Cookie 鉴权）
+    3. 联动 astrbot_plugin_qzone 插件发布到 QQ 空间（可选）
     4. 向指定会话推送结果通知
 
 模块结构（便于二次开发）：
     main.py             插件入口：指令、定时调度与整体流程编排
     diary_generator.py  日记生成：提示词组装、LLM 调用、字数/违禁校验
-    qzone_publisher.py  QQ 空间发布：Web 版说说接口 + Cookie 鉴权
+    qzone_link.py       QQ 空间联动：调用 astrbot_plugin_qzone 发布说说
 """
 
 import asyncio
@@ -25,7 +25,7 @@ from astrbot.api.star import Context, Star, StarTools
 from astrbot.core.message.components import Plain
 
 from .diary_generator import DiaryGenerator, DiaryResult, today_info
-from .qzone_publisher import publish_diary
+from .qzone_link import get_qzone_plugin, publish_diary
 
 JOB_ID = "daily_diary_publish"  # 定时任务 ID
 DEFAULT_TIME = "21:30"          # publish_time 为空或非法时的回退时间
@@ -166,15 +166,10 @@ class DailyDiaryPlugin(Star):
             # 4. 写入知识库
             lines.extend(await self._store_to_kb(date_str, result.text))
 
-            # 5. 发布 QQ 空间
+            # 5. 联动 astrbot_plugin_qzone 发布 QQ 空间
             qzone = self.config.get("qzone", {}) or {}
             if qzone.get("enable"):
-                ok, detail = await publish_diary(
-                    result.text,
-                    str(qzone.get("uin") or ""),
-                    str(qzone.get("cookie") or ""),
-                    str(qzone.get("privacy") or "公开"),
-                )
+                ok, detail = await publish_diary(self.context, result.text)
                 emoji = "🌐" if ok else "⚠️"
                 lines.append(f"{emoji} QQ 空间发布{'成功' if ok else '失败'}：{detail}")
 
@@ -292,12 +287,10 @@ class DailyDiaryPlugin(Star):
             f"📏 字数：{llm.get('word_count_min', 200)} ~ {llm.get('word_count_max', 400)} 字",
             f"📚 知识库：{kb_names}",
             f"🚫 禁止内容：{len(rules)} 条",
-            f"🌐 QQ 空间：{'启用' if qzone.get('enable') else '停用'}"
-            + (
-                f"（QQ {qzone.get('uin') or '?'}，{qzone.get('privacy') or '公开'}）"
-                if qzone.get("enable")
-                else ""
-            ),
+            f"🌐 QQ 空间："
+            + ("未启用" if not qzone.get("enable") else
+               ("已联动 astrbot_plugin_qzone" if get_qzone_plugin(self.context)
+                else "已开启但 astrbot_plugin_qzone 未就绪")),
             f"📢 通知会话：{len(notify.get('sessions') or [])} 个",
         ]
         # 附上现有知识库列表，方便对照配置
