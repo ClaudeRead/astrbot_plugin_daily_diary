@@ -49,6 +49,25 @@ def count_words(text: str) -> int:
     return len(re.sub(r"\s+", "", text))
 
 
+# 句子切分：到句末标点为止（含标点），末尾无标点的残句单独成句
+_SENTENCE_RE = re.compile(r"[^。！？!?~…\n]*[。！？!?~…\n]|[^。！？!?~…\n]+$")
+
+
+def truncate_words(text: str, limit: int) -> str:
+    """按句子累加截断，使去空白字数不超过 limit（保底策略，避免下游分块/发布过载）。"""
+    parts, count = [], 0
+    for match in _SENTENCE_RE.finditer(text):
+        sentence = match.group(0)
+        words = count_words(sentence)
+        if parts and count + words > limit:
+            break
+        parts.append(sentence)
+        count += words
+        if count >= limit:
+            break
+    return "".join(parts).strip() or text[:limit]
+
+
 def clean_text(text: str) -> str:
     """去除首尾空白与模型偶发输出的 Markdown 代码围栏。"""
     t = text.strip()
@@ -185,8 +204,12 @@ class DiaryGenerator:
                 f"请严格修正后重新输出完整日记。"
             )
 
-        logger.warning(
-            f"[每日一记] 重试后仍未完全达标：violations={result.violations}, "
-            f"length_ok={result.length_ok}, words={result.word_count}"
-        )
+        # 兜底：重试后仍超上限时按句子截断，保证下游（知识库分块/说说发布）不因超长失败
+        if result.word_count > max_words:
+            logger.warning(
+                f"[每日一记] 重试后仍超长（{result.word_count} 字），截断至 {max_words} 字以内"
+            )
+            result.text = truncate_words(result.text, max_words)
+            result.word_count = count_words(result.text)
+            result.length_ok = False
         return result

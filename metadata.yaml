@@ -2,7 +2,7 @@ name: astrbot_plugin_daily_diary
 display_name: 每日一记
 short_desc: 每日定时由大模型写日记，自动存 TXT、入知识库、联动 QQ 空间插件发布。
 desc: 每日定时由大模型撰写一篇日记：发布时间、提示词、字数范围、禁止内容、大模型与知识库均可自由配置；写完自动保存 TXT、写入指定知识库，并联动 astrbot_plugin_qzone 插件发布到 QQ 空间。
-version: v1.1.0
+version: v1.1.1
 author: ReadPond
 repo: https://github.com/ClaudeRead/astrbot_plugin_daily_diary
 astrbot_version: ">=4.29.0,<5"
