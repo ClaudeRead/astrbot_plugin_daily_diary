@@ -236,11 +236,16 @@ class DailyDiaryPlugin(Star):
             # 2. 保存 TXT（即使审核未通过也存档，便于排查）
             file_path = self._save_txt(date_str, pretty_date, result)
 
-            # 3. 违禁拦截：不发布、不入库
-            if result.violations:
+            # 3. 拦截：命中禁止内容或不符合人格设定时，不入库、不写记忆、不发布
+            if result.violations or result.persona_issue:
+                reasons = []
+                if result.violations:
+                    reasons.append(f"命中禁止内容：{'、'.join(result.violations)}")
+                if result.persona_issue:
+                    reasons.append(f"不符合人格设定：{result.persona_issue}")
                 lines.append(
-                    f"⛔ 审核未通过（命中：{'、'.join(result.violations)}），"
-                    "已跳过知识库入库与 QQ 空间发布"
+                    f"⛔ 审核未通过（{'；'.join(reasons)}），"
+                    "已跳过知识库入库、记忆写入与 QQ 空间发布"
                 )
                 if file_path:
                     lines.append(f"📄 正文已存档：{file_path.name}")
@@ -279,8 +284,12 @@ class DailyDiaryPlugin(Star):
         out_dir = StarTools.get_data_dir(PLUGIN_DIR_NAME) / "diaries"
         out_dir.mkdir(parents=True, exist_ok=True)
         header = f"《每日一记》{pretty_date}\n"
+        if result.persona_name:
+            header += f"[人格：{result.persona_name}]\n"
         if result.violations:
             header += f"[审核未通过：{', '.join(result.violations)}]\n"
+        if result.persona_issue:
+            header += f"[不符合人格设定：{result.persona_issue}]\n"
 
         path: Path = out_dir / f"diary_{date_str}.txt"
         try:
@@ -396,12 +405,21 @@ class DailyDiaryPlugin(Star):
         else:
             memory_desc = "已开启但未检测到 LivingMemory（回退本地档案）"
         prompt_mode = "补充要求（自定义）" if str(llm.get("prompt") or "").strip() else "内置静态提示词"
+        persona_name, persona_text = await self.generator.resolve_persona()
+        if persona_text:
+            check = "发布前做一致性自检" if llm.get("persona_check", True) else "未开启一致性自检"
+            persona_desc = f"「{persona_name}」（{len(persona_text)} 字，{check}）"
+        else:
+            persona_desc = "未指定（仅用内置通用写作要求）"
+        style_desc = str(llm.get("style") or "").strip() or "未指定"
         lines = [
             "📖 每日一记 · 当前配置",
             f"⏰ 定时：{'启用' if schedule.get('enable', True) else '停用'}，"
             f"每日 {schedule.get('publish_time') or DEFAULT_TIME}"
             f"（{self.scheduler.timezone}，下次：{next_run}）",
             f"🤖 模型：{provider_desc}",
+            f"🎭 人格：{persona_desc}",
+            f"🖋️ 写作风格：{style_desc}",
             f"📏 字数：{llm.get('word_count_min', 200)} ~ {llm.get('word_count_max', 400)} 字",
             f"🧩 提示词：{prompt_mode}，静态 system + 稳定前缀（利于缓存命中）",
             f"📚 知识库：{kb_names}",

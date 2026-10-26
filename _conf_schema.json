@@ -57,11 +57,24 @@
         "description": "补充要求（可选）",
         "hint": "留空即使用内置写作要求（静态系统提示词，利于缓存命中）。填写后会作为【补充要求】附在用户消息里，可用占位符：{date} 中文日期、{min_words}/{max_words} 字数范围、{banned_words} 禁止内容。字数与禁止内容的硬性要求会自动附加，无需重复填写。"
       },
-      "persona": {
+      "persona_id": {
+        "type": "string",
+        "default": "",
+        "_special": "select_persona",
+        "description": "人格设定",
+        "hint": "从 AstrBot 已配置的人格中下拉选择，决定日记的「我是谁」。留空或在 AstrBot 里选的是内置 default 人格时，不使用人格设定。"
+      },
+      "persona_check": {
+        "type": "bool",
+        "default": true,
+        "description": "发布前检查日记是否符合人格设定",
+        "hint": "开启后每篇日记会多一次自检调用；不符合时带上原因重写一次，仍不符合则该篇不发布、不入库、不写记忆（只存档）。"
+      },
+      "style": {
         "type": "text",
         "default": "",
-        "description": "写作风格 / 人格设定（可选）",
-        "hint": "例如「温柔、爱写城市夜景，句子偏短」。会作为【风格设定】放进用户消息，修改它不会让整个前缀缓存失效。"
+        "description": "写作风格（可选，用户自定义）",
+        "hint": "例如「温柔、爱写城市夜景，句子偏短」。只影响表达方式，不会改变人格设定里的身份与口吻；修改它不会让整个前缀缓存失效。"
       },
       "word_count_min": {
         "type": "int",

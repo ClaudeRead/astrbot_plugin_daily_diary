@@ -1,16 +1,24 @@
-"""日记生成模块：提示词组装、LLM 调用、字数与违禁内容校验。
+"""日记生成模块：人格与提示词组装、LLM 调用、字数/违禁/人格一致性校验。
 
 提示词结构（为了最大化供应商端前缀缓存命中）：
     system   : SYSTEM_PROMPT，完全静态，所有日记共用同一段前缀
-    user     : 先放稳定配置项（字数/禁止内容/风格/补充要求），最后才放会变的日期
-               重试时只在 user 末尾追加反馈，system 与 user 前缀都不动
+    user     : 先放稳定配置项（人格设定/字数/禁止内容/写作风格/补充要求），
+               最后才放会变的日期；重试只在 user 末尾追加反馈，system 与
+               user 前缀都不动
+
+人格与写作风格是两件事：
+    - 人格设定（persona_id）从 AstrBot 已配置的人格里选，决定"我是谁"，
+      优先级最高，任何输出都不能违背它；
+    - 写作风格（style）是用户自定义的文字风格，只影响表达方式，不能改身份。
 
 二次开发可关注的调参点：
-    - SYSTEM_PROMPT : 内置写作要求（静态，勿放入日期等可变内容）
-    - WORD_TOLERANCE: 字数浮动容差，超出容差才判定字数不达标并触发重试
-    - MAX_RETRY     : 校验不过时的最大重试次数
+    - SYSTEM_PROMPT        : 内置写作要求（静态，勿放入日期等可变内容）
+    - PERSONA_CHECK_PROMPT : 人格一致性自检用的静态系统提示词
+    - WORD_TOLERANCE       : 字数浮动容差，超出容差才判定字数不达标并触发重试
+    - MAX_RETRY            : 校验不过时的最大重试次数
 """
 
+import json
 import re
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -20,7 +28,10 @@ from astrbot.api import logger
 WEEKDAYS = ("星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日")
 
 WORD_TOLERANCE = 0.3  # 字数允许 ±30% 浮动，超出才算不达标
-MAX_RETRY = 1         # 字数/违禁校验不过时最多重试次数
+MAX_RETRY = 1         # 字数/违禁/人格校验不过时最多重试次数
+
+# AstrBot 内置默认人格的 id：它的内容是通用的英文助手设定，不适合直接写进日记提示词
+SYSTEM_DEFAULT_PERSONA_ID = "default"
 
 # 完全静态的系统提示词：不含日期、字数等可变信息，保证每次请求的前缀一致
 SYSTEM_PROMPT = (
@@ -29,7 +40,24 @@ SYSTEM_PROMPT = (
     "1. 内容真诚自然，有细节、有画面感，避免空洞套话\n"
     "2. 不出现真实他人的隐私信息\n"
     "3. 直接输出日记正文，不要标题、日期行、前言、总结，也不要 Markdown 代码块\n"
-    "4. 严格遵守用户消息中给出的字数范围与禁止内容要求"
+    "4. 严格遵守用户消息中给出的字数范围与禁止内容要求\n"
+    "5. 若用户消息给出了【人格设定】，必须严格按该人格的身份、口吻、语气、价值观与"
+    "说话习惯来写。人格设定优先级最高，与其它任何要求冲突时，一律以人格设定为准\n"
+    "6. 【写作风格】只影响文字风格，不允许改变人格设定里的身份、口吻与立场\n"
+    "7. 记忆与聊天内容只是可选素材：可以用，也可以不用；也可以写完全属于自己的生活、"
+    "见闻与想象。但无论写什么，都不能与人格设定冲突\n"
+    "8. 如果某段内容与人设冲突、或这个人格不可能这么说/这么做，就不要写这段内容"
+)
+
+# 人格一致性自检用的静态系统提示词（与正文生成分开，两段前缀都能各自复用缓存）
+PERSONA_CHECK_PROMPT = (
+    "你是一位严格的人格一致性审核员。用户消息会给出【人格设定】与一篇【日记】。\n"
+    "请判断这篇日记是否符合该人格设定：身份、口吻、语气、用词习惯、价值观、"
+    "会做与不会做的事，是否都与人格一致。\n"
+    "只要出现身份错位、语气明显不符、价值观冲突，或这个人物不可能说出/做出日记里的"
+    "内容，就判为不符合。\n"
+    "只输出一个 JSON 对象，不要任何其它文字：\n"
+    '{"ok": true, "reason": "一句话理由"}'
 )
 
 # 旧版本的默认提示词：老配置里若仍是这段文本，视为未填写（避免与系统提示词重复）
@@ -51,6 +79,8 @@ class DiaryResult:
     text: str = ""                                   # 清洗后的日记正文
     word_count: int = 0                              # 字数（去除空白字符后）
     violations: list = field(default_factory=list)   # 命中的违禁规则，非空则拦截发布
+    persona_issue: str = ""                          # 人格一致性未通过的原因，非空则拦截发布
+    persona_name: str = ""                           # 实际使用的人格名称（无则空）
     length_ok: bool = True                           # 字数是否在容差内（仅提示，不拦截）
     retried: bool = False                            # 是否发生过重试
 
@@ -138,19 +168,26 @@ def build_extra(template, pretty_date, min_words, max_words, banned_rules) -> st
 
 
 def build_user_prompt(pretty_date, min_words, max_words, banned_rules=(),
-                      persona="", extra="") -> str:
+                      style="", extra="", persona_name="",
+                      persona_text="") -> str:
     """组装用户消息：稳定信息在前，日期这种每天都变的信息放最后。
 
     前缀越稳定，供应商端能命中的缓存就越多；重试时只在末尾追加反馈，
     前面的内容保持不变，缓存依然有效。
+    人格设定排在最前：它是最高的约束，也是所有日记共用的一段稳定前缀。
     """
     banned = "、".join(banned_rules) if banned_rules else "无特别限制，但不要涉及他人隐私"
-    parts = [
-        f"【字数】{min_words}~{max_words} 字（不含空白字符）。",
-        f"【禁止出现】{banned}。",
-    ]
-    if str(persona or "").strip():
-        parts.append(f"【风格设定】{str(persona).strip()}")
+    parts = []
+    persona_text = str(persona_text or "").strip()
+    if persona_text:
+        name = str(persona_name or "").strip()
+        if name:
+            parts.append(f"【人格名称】{name}")
+        parts.append(f"【人格设定】\n{persona_text}")
+    parts.append(f"【字数】{min_words}~{max_words} 字（不含空白字符）。")
+    parts.append(f"【禁止出现】{banned}。")
+    if str(style or "").strip():
+        parts.append(f"【写作风格】{str(style).strip()}")
     if str(extra or "").strip():
         parts.append(f"【补充要求】{str(extra).strip()}")
     parts.append(f"【日期】{pretty_date}")
@@ -158,8 +195,39 @@ def build_user_prompt(pretty_date, min_words, max_words, banned_rules=(),
     return "\n".join(parts)
 
 
+def build_persona_check_prompt(persona_name, persona_text, diary_text) -> str:
+    """组装人格一致性自检的用户消息（人格在前、日记在后，前缀可复用）。"""
+    name = str(persona_name or "").strip()
+    head = f"【人格名称】{name}\n" if name else ""
+    return (
+        f"{head}【人格设定】\n{str(persona_text or '').strip()}\n\n"
+        f"【日记】\n{str(diary_text or '').strip()}"
+    )
+
+
+def parse_persona_check(text: str) -> tuple:
+    """解析自检输出，返回 (是否通过, 理由)。
+
+    模型偶尔会带解释文字，这里取第一个 '{' 到最后一个 '}' 的内容；
+    实在解析不出时按通过处理（不因自检本身的格式问题误杀日记），只记日志。
+    """
+    raw = str(text or "").strip()
+    start, end = raw.find("{"), raw.rfind("}")
+    if start == -1 or end <= start:
+        logger.warning(f"[每日一记] 人格自检返回无法解析，按通过处理：{raw[:80]}")
+        return True, ""
+    try:
+        data = json.loads(raw[start : end + 1])
+    except (ValueError, TypeError):
+        logger.warning(f"[每日一记] 人格自检 JSON 解析失败，按通过处理：{raw[:80]}")
+        return True, ""
+    ok = bool(data.get("ok", True))
+    reason = str(data.get("reason") or "").strip()
+    return ok, reason
+
+
 class DiaryGenerator:
-    """调用 LLM 生成日记，并完成字数与违禁内容校验。"""
+    """调用 LLM 生成日记，并完成字数、违禁内容与人格一致性校验。"""
 
     def __init__(self, context, config):
         self.context = context
@@ -167,6 +235,60 @@ class DiaryGenerator:
         # 本轮进程内已确认可用的兜底提供商：一旦主提供商超时过一次，后续请求直接走它，
         # 避免每次重试都为同一个坏提供商反复等满超时时间。
         self._sticky_id = ""
+
+    # ------------------------------------------------------------------
+    # 人格设定
+    # ------------------------------------------------------------------
+
+    def persona_config(self) -> tuple:
+        """返回配置里选定的人格 (persona_id, 是否启用人格一致性自检)。"""
+        llm_cfg = self.config.get("llm", {}) or {}
+        pid = str(llm_cfg.get("persona_id") or "").strip()
+        check = bool(llm_cfg.get("persona_check", True))
+        return pid, check
+
+    async def resolve_persona(self) -> tuple:
+        """解析实际使用的人格，返回 (名称, 人格正文)；没有可用人格时返回 ("", "")。
+
+        - 配置留空：使用 AstrBot 的默认人格；
+        - 默认人格仍是内置的 "default"（通用英文助手设定）时视为"未指定"，
+          避免把 "You are a helpful and friendly assistant." 写进日记提示词。
+        """
+        manager = getattr(self.context, "persona_manager", None)
+        if manager is None:
+            return "", ""
+        pid, _ = self.persona_config()
+        persona = None
+        try:
+            if pid:
+                persona = manager.get_persona_v3_by_id(pid)
+                if persona is None:
+                    # 退回数据库里按 id 查（v3 列表只覆盖已加载的人格）
+                    persona = await manager.get_persona(pid)
+            else:
+                persona = await manager.get_default_persona_v3()
+        except Exception as e:
+            logger.warning(f"[每日一记] 读取人格设定失败（{pid or '默认'}）：{e}")
+            return "", ""
+
+        if persona is None:
+            if pid:
+                logger.warning(f"[每日一记] 未找到人格「{pid}」，本次不使用人格设定")
+            return "", ""
+        if isinstance(persona, dict):
+            name = str(persona.get("name") or pid or "")
+            text = str(persona.get("prompt") or "")
+        else:
+            name = str(getattr(persona, "persona_id", "") or pid or "")
+            text = str(getattr(persona, "system_prompt", "") or "")
+        text = text.strip()
+        if not text or name == SYSTEM_DEFAULT_PERSONA_ID:
+            return "", ""
+        return name, text
+
+    # ------------------------------------------------------------------
+    # 提供商
+    # ------------------------------------------------------------------
 
     def _sticky_provider(self):
         """返回本轮已确认可用的兜底提供商，未确认或已失效时返回 None。"""
@@ -271,7 +393,11 @@ class DiaryGenerator:
                 return candidate
         return None
 
-    def build_prompts(self) -> tuple:
+    # ------------------------------------------------------------------
+    # 提示词与生成
+    # ------------------------------------------------------------------
+
+    def build_prompts(self, persona_name="", persona_text="") -> tuple:
         """返回 (system_prompt, user_prompt)；system 永远是同一段静态文本。"""
         llm_cfg = self.config.get("llm", {}) or {}
         rules_cfg = self.config.get("content_rules", {}) or {}
@@ -291,16 +417,34 @@ class DiaryGenerator:
             min_words=min_words,
             max_words=max_words,
             banned_rules=banned_rules,
-            persona=str(llm_cfg.get("persona") or ""),
+            style=str(llm_cfg.get("style") or ""),
             extra=extra,
+            persona_name=persona_name,
+            persona_text=persona_text,
         )
         return SYSTEM_PROMPT, user_prompt
+
+    async def _check_persona(self, persona_name: str, persona_text: str,
+                            diary_text: str) -> tuple:
+        """人格一致性自检，返回 (是否通过, 理由)；未配置人格时直接通过。"""
+        pid, check = self.persona_config()
+        if not check or not persona_text.strip():
+            return True, ""
+        try:
+            raw = await self._chat(
+                PERSONA_CHECK_PROMPT,
+                build_persona_check_prompt(persona_name, persona_text, diary_text),
+            )
+        except Exception as e:
+            logger.warning(f"[每日一记] 人格一致性自检失败（{e}），本次跳过自检")
+            return True, ""
+        return parse_persona_check(raw)
 
     async def generate(self) -> DiaryResult:
         """生成一篇日记。
 
-        校验（违禁内容 / 字数容差）不过时，带上针对性反馈重试一次；
-        重试后违禁仍未通过则由调用方拦截发布与入库。
+        校验（违禁内容 / 字数容差 / 人格一致性）不过时，带上针对性反馈重试一次；
+        重试后仍未通过则由调用方拦截发布与入库。
         """
         llm_cfg = self.config.get("llm", {}) or {}
         min_words = max(1, int(llm_cfg.get("word_count_min", 200) or 200))
@@ -312,16 +456,24 @@ class DiaryGenerator:
         lower = max(1, int(min_words * (1 - WORD_TOLERANCE)))
         upper = int(max_words * (1 + WORD_TOLERANCE))
 
-        system_prompt, base_user = self.build_prompts()
-        result = DiaryResult()
+        persona_name, persona_text = await self.resolve_persona()
+        if persona_text:
+            logger.info(f"[每日一记] 使用人格设定「{persona_name}」")
+        system_prompt, base_user = self.build_prompts(persona_name, persona_text)
+
+        result = DiaryResult(persona_name=persona_name)
         user_prompt = base_user
         for attempt in range(MAX_RETRY + 1):
             result.text = clean_text(await self._chat(system_prompt, user_prompt))
             result.word_count = count_words(result.text)
             result.violations = check_violations(result.text, banned_rules)
             result.length_ok = lower <= result.word_count <= upper
+            persona_ok, reason = await self._check_persona(
+                persona_name, persona_text, result.text
+            )
+            result.persona_issue = "" if persona_ok else (reason or "未通过人格一致性检查")
 
-            if not result.violations and result.length_ok:
+            if not result.violations and not result.persona_issue and result.length_ok:
                 return result
             if attempt == MAX_RETRY:
                 break
@@ -331,6 +483,8 @@ class DiaryGenerator:
             feedback = []
             if result.violations:
                 feedback.append(f"包含禁止内容（{'、'.join(result.violations)}）")
+            if result.persona_issue:
+                feedback.append(f"不符合人格设定（{result.persona_issue}）")
             if not result.length_ok:
                 feedback.append(
                     f"字数 {result.word_count} 偏离 {min_words}~{max_words} 字要求"
