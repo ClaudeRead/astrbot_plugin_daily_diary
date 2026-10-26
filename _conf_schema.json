@@ -19,6 +19,12 @@
         "default": "Asia/Shanghai",
         "description": "定时触发所用时区",
         "hint": "IANA 时区名。Docker 部署的 AstrBot 容器多为 UTC，保持默认 Asia/Shanghai 即按北京时间触发。"
+      },
+      "catch_up": {
+        "type": "bool",
+        "default": true,
+        "description": "启动时补跑当天漏掉的日记",
+        "hint": "容器重启会丢失已经错过的定时点；开启后，若启动了但今天还没生成，会在启动约 1 分钟后自动补一篇。"
       }
     }
   },
@@ -39,11 +45,23 @@
         "description": "模型 ID",
         "hint": "留空则使用该提供商配置中的默认模型。"
       },
+      "request_max_retries": {
+        "type": "int",
+        "default": 1,
+        "description": "单次请求最大重试次数",
+        "hint": "夜间接口更容易超时，重试次数过多会把定时任务拖到失败；建议 1，失败后会自动换一个可用的提供商兜底。"
+      },
       "prompt": {
         "type": "text",
-        "default": "你是一位热爱生活、观察细腻的日记作者。请以第一人称写一篇 {date} 的日记，主题自选，可以记录生活、见闻、思考或心情。要求：\n1. 内容真诚自然，有细节、有画面感，避免空洞套话\n2. 不要出现真实他人的隐私信息\n3. 直接输出日记正文，不要标题、日期行、前言或总结",
-        "description": "日记写作提示词",
-        "hint": "可用占位符：{date} 中文日期、{min_words}/{max_words} 字数范围、{banned_words} 禁止内容。字数与禁止内容的硬性要求会自动附在提示词末尾，无需重复填写。"
+        "default": "",
+        "description": "补充要求（可选）",
+        "hint": "留空即使用内置写作要求（静态系统提示词，利于缓存命中）。填写后会作为【补充要求】附在用户消息里，可用占位符：{date} 中文日期、{min_words}/{max_words} 字数范围、{banned_words} 禁止内容。字数与禁止内容的硬性要求会自动附加，无需重复填写。"
+      },
+      "persona": {
+        "type": "text",
+        "default": "",
+        "description": "写作风格 / 人格设定（可选）",
+        "hint": "例如「温柔、爱写城市夜景，句子偏短」。会作为【风格设定】放进用户消息，修改它不会让整个前缀缓存失效。"
       },
       "word_count_min": {
         "type": "int",
@@ -87,6 +105,42 @@
         "default": true,
         "description": "保存 TXT 文件",
         "hint": "保存路径：data/plugin_data/astrbot_plugin_daily_diary/diaries/"
+      }
+    }
+  },
+  "memory": {
+    "type": "object",
+    "description": "🧠 长期记忆（LivingMemory）",
+    "items": {
+      "enable": {
+        "type": "bool",
+        "default": true,
+        "description": "把每天的日记写成一条记忆",
+        "hint": "需安装并启用 astrbot_plugin_livingmemory；未安装或未就绪时自动回退写入本地 memories_fallback.jsonl。"
+      },
+      "importance": {
+        "type": "float",
+        "default": 0.6,
+        "description": "记忆重要性（0~1）",
+        "hint": "日记属于日常记录，建议 0.5~0.7，过高会挤占其它记忆的检索位置。"
+      },
+      "scope": {
+        "type": "string",
+        "default": "livingmemory:global",
+        "description": "记忆作用域",
+        "hint": "默认写入全局作用域；如需只对某个会话生效，可填该会话的 unified_msg_origin。"
+      },
+      "topics": {
+        "type": "string",
+        "default": "日记",
+        "description": "记忆主题标签",
+        "hint": "逗号分隔，会自动补上当天日期，最多取 5 个。"
+      },
+      "sentiment": {
+        "type": "string",
+        "default": "neutral",
+        "description": "记忆情绪标签",
+        "hint": "日记生成不额外判断情绪，保持 neutral 即可（可选 positive / negative）。"
       }
     }
   },

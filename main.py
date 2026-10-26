@@ -3,16 +3,21 @@
 每日定时由大模型撰写一篇日记，完成后自动：
     1. 保存为 TXT 文件（data/plugin_data/astrbot_plugin_daily_diary/diaries/）
     2. 写入指定的知识库（支持多个）
-    3. 联动 astrbot_plugin_qzone 插件发布到 QQ 空间（可选）
-    4. 向指定会话推送结果通知
+    3. 联动 astrbot_plugin_livingmemory，把日记写成一条记忆（可选）
+    4. 联动 astrbot_plugin_qzone 插件发布到 QQ 空间（可选）
+    5. 向指定会话推送结果通知
 
 模块结构（便于二次开发）：
     main.py             插件入口：指令、定时调度与整体流程编排
     diary_generator.py  日记生成：提示词组装、LLM 调用、字数/违禁校验
+    living_memory.py    LivingMemory 联动：把日记写进长期记忆
     qzone_link.py       QQ 空间联动：调用 astrbot_plugin_qzone 发布说说
 """
 
 import asyncio
+import json
+import time
+from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -25,12 +30,14 @@ from astrbot.api.star import Context, Star, StarTools
 from astrbot.core.message.components import Plain
 
 from .diary_generator import DiaryGenerator, DiaryResult, today_info
+from .living_memory import build_memory_text, get_lmem, parse_topics, save_memory
 from .qzone_link import get_qzone_plugin, publish_diary
 
 JOB_ID = "daily_diary_publish"  # 定时任务 ID
 DEFAULT_TIME = "21:30"          # publish_time 为空或非法时的回退时间
 DEFAULT_TZ = "Asia/Shanghai"    # 容器常为 UTC，默认按北京时间触发
 PLUGIN_DIR_NAME = "astrbot_plugin_daily_diary"
+CATCH_UP_DELAY = 60             # 启动后补跑当天漏掉的日记前，先等启动流程稳定
 
 
 class DailyDiaryPlugin(Star):
@@ -43,6 +50,7 @@ class DailyDiaryPlugin(Star):
         # 定时器显式指定时区，避免跟随容器系统时区（多为 UTC）导致触发时间偏移
         self.scheduler = AsyncIOScheduler(timezone=self._resolve_timezone())
         self._lock = asyncio.Lock()  # 防止定时任务与手动触发同时生成
+        self._catch_up_task: asyncio.Task | None = None
 
     def _resolve_timezone(self) -> ZoneInfo:
         """解析配置的时区；非法时依次回退到 Asia/Shanghai 与系统本地时区。"""
@@ -61,9 +69,15 @@ class DailyDiaryPlugin(Star):
             self.scheduler.start()   # 先启动调度器，add_job 后才能读到下次运行时间
         self._setup_schedule()
         logger.info("[每日一记] 插件已加载")
+        # 进程重启会丢掉错过的触发点：启动后检查今天是否漏跑，漏了就补上
+        if self._catch_up_task and not self._catch_up_task.done():
+            self._catch_up_task.cancel()
+        self._catch_up_task = asyncio.create_task(self._catch_up_missed())
 
     async def terminate(self) -> None:
         """插件停用/卸载时关闭调度器。"""
+        if self._catch_up_task and not self._catch_up_task.done():
+            self._catch_up_task.cancel()
         if self.scheduler.running:
             self.scheduler.shutdown(wait=False)
 
@@ -80,15 +94,7 @@ class DailyDiaryPlugin(Star):
             logger.info("[每日一记] 定时生成已停用")
             return
 
-        time_str = str(cfg.get("publish_time") or DEFAULT_TIME).strip()
-        try:
-            hh, mm = time_str.split(":")
-            hour, minute = int(hh), int(mm)
-            if not (0 <= hour <= 23 and 0 <= minute <= 59):
-                raise ValueError
-        except ValueError:
-            logger.warning(f"[每日一记] 时间格式 {time_str!r} 无效，回退为 {DEFAULT_TIME}")
-            hour, minute = 21, 30
+        hour, minute = self._parse_time(cfg)
 
         self.scheduler.add_job(
             self._scheduled_job,
@@ -109,6 +115,75 @@ class DailyDiaryPlugin(Star):
         """定时任务入口：生成日记并把结果推送到通知会话。"""
         summary = await self._run_diary()
         await self._notify_all(summary)
+
+    # ------------------------------------------------------------------
+    # 漏跑补跑（进程重启会丢掉 APScheduler 里错过的触发点）
+    # ------------------------------------------------------------------
+
+    def _parse_time(self, cfg: dict) -> tuple:
+        """把 publish_time 解析成 (hour, minute)，非法时回退 DEFAULT_TIME。"""
+        time_str = str(cfg.get("publish_time") or DEFAULT_TIME).strip()
+        try:
+            hh, mm = time_str.split(":")
+            hour, minute = int(hh), int(mm)
+            if not (0 <= hour <= 23 and 0 <= minute <= 59):
+                raise ValueError
+            return hour, minute
+        except ValueError:
+            logger.warning(f"[每日一记] 时间格式 {time_str!r} 无效，回退为 {DEFAULT_TIME}")
+            return 21, 30
+
+    def _state_path(self) -> Path:
+        return StarTools.get_data_dir(PLUGIN_DIR_NAME) / "state.json"
+
+    def _done_today(self) -> bool:
+        """今天是否已经生成过日记（以状态文件为准，TXT 存档作为兜底判据）。"""
+        date_str, _ = today_info()
+        try:
+            state = json.loads(self._state_path().read_text(encoding="utf-8"))
+            if str(state.get("last_date") or "") == date_str:
+                return True
+        except Exception:
+            pass
+        storage = self.config.get("storage", {}) or {}
+        if storage.get("save_txt", True):
+            path = StarTools.get_data_dir(PLUGIN_DIR_NAME) / "diaries" / f"diary_{date_str}.txt"
+            return path.exists()
+        return False
+
+    def _mark_done(self, date_str: str) -> None:
+        try:
+            path = self._state_path()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(
+                json.dumps({"last_date": date_str}, ensure_ascii=False), encoding="utf-8"
+            )
+        except OSError as e:
+            logger.warning(f"[每日一记] 状态文件写入失败: {e}")
+
+    async def _catch_up_missed(self) -> None:
+        """启动后检查：今天的定时点已过但还没生成，就补跑一次。"""
+        cfg = self.config.get("schedule", {}) or {}
+        if not cfg.get("enable", True) or not cfg.get("catch_up", True):
+            return
+        hour, minute = self._parse_time(cfg)
+        tz = self.scheduler.timezone
+        now = datetime.now(tz) if tz else datetime.now()
+        if (now.hour, now.minute) < (hour, minute):
+            return  # 今天还没到触发时间，交给定时任务
+        if self._done_today():
+            return
+        logger.info(
+            f"[每日一记] 检测到今天 {hour:02d}:{minute:02d} 的日记还没生成（可能因重启丢失），"
+            f"{CATCH_UP_DELAY} 秒后自动补跑"
+        )
+        await asyncio.sleep(CATCH_UP_DELAY)
+        if self._done_today():
+            return
+        try:
+            await self._scheduled_job()
+        except Exception as e:
+            logger.error(f"[每日一记] 补跑失败: {e}")
 
     # ------------------------------------------------------------------
     # 指令
@@ -139,7 +214,9 @@ class DailyDiaryPlugin(Star):
             return "[每日一记] 已有日记生成任务正在进行，请稍候。"
 
         async with self._lock:
+            started = time.monotonic()
             date_str, pretty_date = today_info()
+            logger.info(f"[每日一记] 开始生成 {pretty_date} 的日记")
             lines = [f"📖 每日一记 · {pretty_date}"]
 
             # 1. 生成（内部已完成字数/违禁校验与一次重试）
@@ -148,6 +225,13 @@ class DailyDiaryPlugin(Star):
             except Exception as e:
                 logger.error(f"[每日一记] 生成失败: {e}")
                 return "\n".join(lines + [f"❌ 生成失败：{e}"])
+
+            # 生成成功即记录，避免补跑逻辑重复生成同一篇
+            self._mark_done(date_str)
+            logger.info(
+                f"[每日一记] 生成完成，字数 {result.word_count}，"
+                f"耗时 {time.monotonic() - started:.1f}s"
+            )
 
             # 2. 保存 TXT（即使审核未通过也存档，便于排查）
             file_path = self._save_txt(date_str, pretty_date, result)
@@ -166,14 +250,19 @@ class DailyDiaryPlugin(Star):
             # 4. 写入知识库
             lines.extend(await self._store_to_kb(date_str, result.text))
 
-            # 5. 联动 astrbot_plugin_qzone 发布 QQ 空间
+            # 5. 联动 astrbot_plugin_livingmemory，把日记写成一条记忆
+            memory_line = await self._store_to_memory(pretty_date, result.text)
+            if memory_line:
+                lines.append(memory_line)
+
+            # 6. 联动 astrbot_plugin_qzone 发布 QQ 空间
             qzone = self.config.get("qzone", {}) or {}
             if qzone.get("enable"):
                 ok, detail = await publish_diary(self.context, result.text)
                 emoji = "🌐" if ok else "⚠️"
                 lines.append(f"{emoji} QQ 空间发布{'成功' if ok else '失败'}：{detail}")
 
-            # 6. 汇总
+            # 7. 汇总
             note = "" if result.length_ok else "（字数偏离设定范围）"
             lines.append(f"✅ 完成，字数 {result.word_count}{note}")
             if file_path:
@@ -225,6 +314,27 @@ class DailyDiaryPlugin(Star):
                 logger.error(f"[每日一记] 写入知识库 {name} 失败: {e}")
                 messages.append(f"⚠️ 知识库「{name}」写入失败：{e}")
         return messages
+
+    async def _store_to_memory(self, pretty_date: str, text: str) -> str:
+        """把日记写成一条 LivingMemory 记忆，返回结果消息（未启用时返回空串）。"""
+        cfg = self.config.get("memory", {}) or {}
+        if not cfg.get("enable", True):
+            return ""
+        memory_text = build_memory_text(pretty_date, text)
+        if not memory_text:
+            return ""
+        topics = parse_topics(cfg.get("topics"), pretty_date)
+        store = await save_memory(
+            self.context,
+            StarTools.get_data_dir(PLUGIN_DIR_NAME),
+            cfg,
+            memory_text,
+            topics,
+            str(cfg.get("sentiment") or "neutral"),
+        )
+        if not store:
+            return "⚠️ 记忆写入失败（详见日志）"
+        return f"🧠 记忆落点：{store}"
 
     async def _notify_all(self, text: str) -> None:
         """把结果摘要主动推送到配置的所有通知会话。"""
@@ -278,6 +388,14 @@ class DailyDiaryPlugin(Star):
             provider_desc = f"解析失败：{e}"
 
         kb_names = "、".join(storage.get("kb_names") or []) or "未指定"
+        memory = self.config.get("memory", {}) or {}
+        if not memory.get("enable", True):
+            memory_desc = "未启用"
+        elif get_lmem(self.context):
+            memory_desc = "已联动 astrbot_plugin_livingmemory"
+        else:
+            memory_desc = "已开启但未检测到 LivingMemory（回退本地档案）"
+        prompt_mode = "补充要求（自定义）" if str(llm.get("prompt") or "").strip() else "内置静态提示词"
         lines = [
             "📖 每日一记 · 当前配置",
             f"⏰ 定时：{'启用' if schedule.get('enable', True) else '停用'}，"
@@ -285,7 +403,9 @@ class DailyDiaryPlugin(Star):
             f"（{self.scheduler.timezone}，下次：{next_run}）",
             f"🤖 模型：{provider_desc}",
             f"📏 字数：{llm.get('word_count_min', 200)} ~ {llm.get('word_count_max', 400)} 字",
+            f"🧩 提示词：{prompt_mode}，静态 system + 稳定前缀（利于缓存命中）",
             f"📚 知识库：{kb_names}",
+            f"🧠 记忆：{memory_desc}",
             f"🚫 禁止内容：{len(rules)} 条",
             f"🌐 QQ 空间："
             + ("未启用" if not qzone.get("enable") else
